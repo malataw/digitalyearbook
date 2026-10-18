@@ -12,11 +12,11 @@
 
     const yearOrder = ['Freshman', 'Sophomore', 'Junior', 'Senior', 'Fifth Year'];
     const yearEmoji = {
-        Freshman: '',
-        Sophomore: '',
-        Junior: '',
-        Senior: '',
-        'Fifth Year': ''
+        Freshman: '🌟',
+        Sophomore: '📚',
+        Junior: '⚡',
+        Senior: '🔧',
+        'Fifth Year': '🎯'
     };
 
     let isAdmin = false;
@@ -632,7 +632,7 @@
                                 const newCode = prompt('Course code:', course.code)?.trim();
                                 const newName = prompt('Course name:', course.name)?.trim();
                                 const newYear = prompt(
-                                    'Year (, Sophomore, Junior, Senior, Fifth Year):',
+                                    'Year (Freshman, Sophomore, Junior, Senior, Fifth Year):',
                                     course.year
                                 )?.trim();
                                 if (!newCode || !newName || !newYear) return;
