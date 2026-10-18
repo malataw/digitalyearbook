@@ -7,13 +7,11 @@
     box-sizing: border-box;
 }
 
-
-
 body {
     font-family: 'Inter', sans-serif;
-    background: linear-gradient(145deg, #f5f7fa 0%, #f0f3f9 100%);
+    background: linear-gradient(145deg, #f5f7fa 0%, #e8edf5 100%);
     min-height: 100vh;
-    color: #293742;
+    color: #2C2C2C;
 }
 
 .hidden { display: none !important; }
@@ -101,6 +99,20 @@ body {
 }
 
 .admin-status i { color: #007ACC; }
+
+.cloud-status {
+    display: none; /* 👈 hides the cloud status indicator */
+    font-size: 0.75rem;
+    align-items: center;
+    gap: 4px;
+    padding: 0.2rem 0.8rem;
+    border-radius: 40px;
+    background: rgba(255, 255, 255, 0.2);
+}
+
+.cloud-status i { color: #FFA000; }
+.cloud-status.connected i { color: #4CAF50; }
+.cloud-status.error i { color: #D32F2F; }
 
 /* ============================================================
    NAVIGATION
@@ -983,52 +995,4 @@ body {
     .home-preview-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
     .zoom-modal .zoom-close { top: 10px; right: 15px; font-size: 2rem; }
     .courses-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
-}
-.edit-controls button,
-.rename-cat-btn {
-    border: 0;
-    border-radius: 4px;
-    width: 28px;
-    height: 28px;
-    cursor: pointer;
-    color: #2C2C2C;
-    background: rgba(255, 255, 255, 0.7);
-}
-
-.rename-cat-btn {
-    width: auto;
-    padding: 0 0.6rem;
-    margin-left: auto;
-}
-
-.edit-controls button:hover,
-.rename-cat-btn:hover {
-    color: #fff;
-    background: #007ACC;
-}
-
-.edit-controls .delete-btn:hover {
-    background: #D32F2F;
-}
-
-.editable-input {
-    max-width: 100%;
-    padding: 0.25rem;
-    border: 1px solid #aaa;
-    border-radius: 4px;
-    font: inherit;
-}
-
-.mem-card:not(.stored) .remove-btn {
-    display: none;
-}
-
-@media (prefers-reduced-motion: reduce) {
-    *,
-    *::before,
-    *::after {
-        scroll-behavior: auto !important;
-        animation-duration: 0.01ms !important;
-        transition-duration: 0.01ms !important;
-    }
 }

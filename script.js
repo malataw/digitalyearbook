@@ -1,26 +1,15 @@
-(() => {
+(function () {
     'use strict';
 
-    const ADMIN_PASSWORD = 'admin123'; // Demo only; do not use as real authentication.
-    const STORAGE_KEY = 'ece_yearbook_data';
-    const LOGO_KEY = 'school_logo';
-    const MAX_MEMORY_BYTES = 10 * 1024 * 1024;
-    const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
+    /* ============================================================
+       FIREBASE STATE (populated once the module script fires)
+       ============================================================ */
+    let FIREBASE = null;      // window.Firebase
+    let firebaseReady = false;
 
-    const $ = (selector, root = document) => root.querySelector(selector);
-    const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-
-    const yearOrder = ['Freshman', 'Sophomore', 'Junior', 'Senior', 'Fifth Year'];
-    const yearEmoji = {
-        Freshman: '',
-        Sophomore: '',
-        Junior: '',
-        Senior: '',
-        'Fifth Year': ''
-    };
-
-    let isAdmin = false;
-
+    /* ============================================================
+       DATA (kept in memory – synced from Firestore on load)
+       ============================================================ */
     let allStudents = [
         { name: 'Abebech Abera', id: 'ECE/1001/19', stream: 'Computer' },
         { name: 'Abel Admassu', id: 'ECE/1002/19', stream: 'Computer' },
@@ -75,14 +64,15 @@
     ];
 
     let memoryData = {
-        Trip: [],
-        Graduation: [],
+        'Trip': [],
+        'Graduation': [],
         'Lab Sessions': [],
-        Events: [],
-        Other: []
+        'Events': [],
+        'Other': []
     };
 
     let coursesData = [
+        // Freshman
         { code: 'ECEG 1011', name: 'Engineering Drawing', year: 'Freshman' },
         { code: 'ECEG 1012', name: 'Introduction to Engineering', year: 'Freshman' },
         { code: 'MATH 1011', name: 'Applied Mathematics I', year: 'Freshman' },
@@ -95,6 +85,7 @@
         { code: 'ECEG 1013', name: 'Computer Programming I', year: 'Freshman' },
         { code: 'ECEG 1014', name: 'Computer Programming II', year: 'Freshman' },
         { code: 'ENGL 1011', name: 'English for Engineers', year: 'Freshman' },
+        // Sophomore
         { code: 'ECEG 2011', name: 'Circuit Theory I', year: 'Sophomore' },
         { code: 'ECEG 2012', name: 'Circuit Theory II', year: 'Sophomore' },
         { code: 'ECEG 2013', name: 'Electronics I', year: 'Sophomore' },
@@ -105,6 +96,7 @@
         { code: 'MATH 2012', name: 'Applied Mathematics IV', year: 'Sophomore' },
         { code: 'ECEG 2019', name: 'Fundamentals of Electrical Engineering', year: 'Sophomore' },
         { code: 'STAT 2011', name: 'Probability and Statistics', year: 'Sophomore' },
+        // Junior
         { code: 'ECEG 3011', name: 'Communication Systems I', year: 'Junior' },
         { code: 'ECEG 3012', name: 'Communication Systems II', year: 'Junior' },
         { code: 'ECEG 3013', name: 'Control Systems I', year: 'Junior' },
@@ -115,944 +107,1164 @@
         { code: 'ECEG 3022', name: 'Network Analysis', year: 'Junior' }
     ];
 
-    function showModal(title, message, type = 'info', callback) {
+    const ADMIN_PASSWORD = 'admin123';
+    let isAdmin = false;
+
+    /* ============================================================
+       HELPERS
+       ============================================================ */
+    const $ = (sel, root = document) => root.querySelector(sel);
+    const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+
+    const YEAR_ORDER = ['Freshman', 'Sophomore', 'Junior', 'Senior', 'Fifth Year'];
+    const YEAR_EMOJI = {
+        'Freshman': '',
+        'Sophomore': '',
+        'Junior': '',
+        'Senior': '',
+        'Fifth Year': ''
+    };
+
+    /* ============================================================
+       CLOUD STATUS
+       ============================================================ */
+    function setCloudStatus(state, message) {
+        const el = $('#cloudStatus');
+        if (!el) return;
+        el.className = 'cloud-status ' + state;
+        el.innerHTML = `<i class="fas ${state === 'connected' ? 'fa-cloud' : state === 'error' ? 'fa-exclamation-triangle' : 'fa-spinner fa-spin'}"></i> ${message}`;
+    }
+
+    /* ============================================================
+       FIREBASE HELPERS
+       ============================================================ */
+    // Upload a File/Blob to Firebase Storage and return the public URL.
+    async function uploadToCloud(path, file) {
+        if (!FIREBASE) throw new Error('Firebase not ready');
+        const storageRef = FIREBASE.ref(FIREBASE.storage, path);
+        await FIREBASE.uploadBytes(storageRef, file, { contentType: file.type });
+        return await FIREBASE.getDownloadURL(storageRef);
+    }
+
+    // Delete a file from Firebase Storage by its path.
+    async function deleteFromCloud(path) {
+        if (!FIREBASE) return;
+        try {
+            const storageRef = FIREBASE.ref(FIREBASE.storage, path);
+            await FIREBASE.deleteObject(storageRef);
+        } catch (e) {
+            // Ignore if file is missing
+        }
+    }
+
+    // Save a URL (or any data) into Firestore under a specific collection/doc.
+    async function saveToFirestore(collection, docId, data) {
+        if (!FIREBASE) return;
+        const ref = FIREBASE.doc(FIREBASE.db, collection, docId);
+        await FIREBASE.setDoc(ref, data, { merge: true });
+    }
+
+    // Read a single document from Firestore.
+    async function readFromFirestore(collection, docId) {
+        if (!FIREBASE) return null;
+        const ref = FIREBASE.doc(FIREBASE.db, collection, docId);
+        const snap = await FIREBASE.getDoc(ref);
+        return snap.exists() ? snap.data() : null;
+    }
+
+    /* ============================================================
+       SAVE / LOAD WHOLE YEARBOOK
+       ============================================================ */
+    async function saveAllData() {
+        if (!FIREBASE) return;   // Silently skip if offline
+        try {
+            await saveToFirestore('yearbook', 'main', {
+                students: allStudents,
+                lecturers,
+                gratitude: gratitudeItems,
+                memories: memoryData,
+                courses: coursesData
+            });
+        } catch (e) {
+            console.error('Save to Firestore failed:', e);
+        }
+    }
+
+    async function loadAllData() {
+        if (!FIREBASE) return;
+        try {
+            const data = await readFromFirestore('yearbook', 'main');
+            if (data) {
+                if (data.students) allStudents = data.students;
+                if (data.lecturers) lecturers = data.lecturers;
+                if (data.gratitude) gratitudeItems = data.gratitude;
+                if (data.memories) {
+                    Object.keys(memoryData).forEach((cat) => {
+                        if (!data.memories[cat]) data.memories[cat] = [];
+                    });
+                    memoryData = data.memories;
+                }
+                if (data.courses) coursesData = data.courses;
+            }
+        } catch (e) {
+            console.error('Load from Firestore failed:', e);
+        }
+    }
+
+    /* ============================================================
+       MODALS
+       ============================================================ */
+    function showModal(title, message, type, callback) {
         const modal = $('#customModal');
         const icon = $('#modalIcon');
-        const button = $('#modalBtn');
-        if (!modal || !icon || !button) return;
+        const titleEl = $('#modalTitle');
+        const messageEl = $('#modalMessage');
+        const btn = $('#modalBtn');
 
-        const iconClasses = {
-            success: 'fa-check-circle',
-            error: 'fa-times-circle',
-            warning: 'fa-info-circle',
-            info: 'fa-info-circle'
-        };
-        const colors = {
-            success: '#007ACC',
-            error: '#D32F2F',
-            warning: '#FFA000',
-            info: '#007ACC'
-        };
-
-        icon.replaceChildren();
+        icon.innerHTML = '';
         const i = document.createElement('i');
-        i.className = `fas ${iconClasses[type] || iconClasses.info}`;
-        i.style.color = colors[type] || colors.info;
+        if (type === 'success') {
+            i.className = 'fas fa-check-circle';
+            i.style.color = '#007ACC';
+            btn.style.background = '#007ACC';
+        } else if (type === 'error') {
+            i.className = 'fas fa-times-circle';
+            i.style.color = '#D32F2F';
+            btn.style.background = '#D32F2F';
+        } else if (type === 'warning') {
+            i.className = 'fas fa-info-circle';
+            i.style.color = '#FFA000';
+            btn.style.background = '#FFA000';
+        } else {
+            i.className = 'fas fa-info-circle';
+            i.style.color = '#007ACC';
+            btn.style.background = '#007ACC';
+        }
         icon.appendChild(i);
 
-        $('#modalTitle').textContent = title;
-        $('#modalMessage').textContent = message;
-        button.style.background = colors[type] || colors.info;
+        titleEl.textContent = title;
+        messageEl.textContent = message;
+
         modal.classList.add('active');
         document.body.style.overflow = 'hidden';
 
         const close = () => {
             modal.classList.remove('active');
             document.body.style.overflow = '';
-            button.removeEventListener('click', close);
+            btn.removeEventListener('click', close);
             document.removeEventListener('keydown', onKey);
             modal.removeEventListener('click', onBackdrop);
-            callback?.();
+            if (callback) callback();
         };
-        const onKey = event => {
-            if (event.key === 'Escape') close();
-        };
-        const onBackdrop = event => {
-            if (event.target === modal) close();
-        };
+        const onKey = (e) => { if (e.key === 'Escape') close(); };
+        const onBackdrop = (e) => { if (e.target === modal) close(); };
 
-        button.addEventListener('click', close);
+        btn.addEventListener('click', close);
         document.addEventListener('keydown', onKey);
         modal.addEventListener('click', onBackdrop);
     }
 
-    function showConfirmModal(message, callback) {
+    function showConfirmModal(message, onConfirm) {
         const modal = $('#confirmModal');
-        const ok = $('#confirmOk');
-        const cancel = $('#confirmCancel');
-        if (!modal || !ok || !cancel) return;
+        const messageEl = $('#confirmMessage');
+        const okBtn = $('#confirmOk');
+        const cancelBtn = $('#confirmCancel');
 
-        $('#confirmMessage').textContent = message;
+        messageEl.textContent = message;
         modal.classList.add('active');
         document.body.style.overflow = 'hidden';
 
         const cleanup = () => {
             modal.classList.remove('active');
             document.body.style.overflow = '';
-            ok.removeEventListener('click', onOk);
-            cancel.removeEventListener('click', onCancel);
+            okBtn.removeEventListener('click', onOk);
+            cancelBtn.removeEventListener('click', onCancel);
             document.removeEventListener('keydown', onKey);
             modal.removeEventListener('click', onBackdrop);
         };
-        const onOk = () => {
-            cleanup();
-            callback?.(true);
-        };
-        const onCancel = () => {
-            cleanup();
-            callback?.(false);
-        };
-        const onKey = event => {
-            if (event.key === 'Escape') onCancel();
-        };
-        const onBackdrop = event => {
-            if (event.target === modal) onCancel();
-        };
+        const onOk = () => { cleanup(); onConfirm && onConfirm(true); };
+        const onCancel = () => { cleanup(); onConfirm && onConfirm(false); };
+        const onKey = (e) => { if (e.key === 'Escape') onCancel(); };
+        const onBackdrop = (e) => { if (e.target === modal) onCancel(); };
 
-        ok.addEventListener('click', onOk);
-        cancel.addEventListener('click', onCancel);
+        okBtn.addEventListener('click', onOk);
+        cancelBtn.addEventListener('click', onCancel);
         document.addEventListener('keydown', onKey);
         modal.addEventListener('click', onBackdrop);
     }
 
-    function saveAllData() {
-        try {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify({
-                students: allStudents,
-                lecturers,
-                gratitude: gratitudeItems,
-                memories: memoryData,
-                courses: coursesData
-            }));
-            return true;
-        } catch (error) {
-            showModal(
-                'Storage full',
-                'Could not save changes. Remove some large uploads or use smaller files.',
-                'warning'
-            );
-            return false;
-        }
-    }
+    /* ============================================================
+       ZOOM
+       ============================================================ */
+    function setupZoom() {
+        const modal = $('#zoomModal');
+        const closeBtn = $('#zoomClose');
+        const content = $('#zoomContent');
 
-    function loadAllData() {
-        try {
-            const raw = localStorage.getItem(STORAGE_KEY);
-            if (!raw) return;
-            const data = JSON.parse(raw);
-
-            if (Array.isArray(data.students)) allStudents = data.students;
-            if (Array.isArray(data.lecturers)) lecturers = data.lecturers;
-            if (Array.isArray(data.gratitude)) gratitudeItems = data.gratitude;
-            if (Array.isArray(data.courses)) coursesData = data.courses;
-
-            if (data.memories && typeof data.memories === 'object') {
-                memoryData = { ...memoryData, ...data.memories };
-                Object.keys(memoryData).forEach(category => {
-                    if (!Array.isArray(memoryData[category])) memoryData[category] = [];
-                });
-            }
-        } catch (error) {
-            console.warn('Saved yearbook data could not be read.', error);
-        }
-    }
-
-    function makeButton(iconClass, title, onClick, danger = false) {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.title = title;
-        button.setAttribute('aria-label', title);
-        if (danger) button.classList.add('delete-btn');
-        const icon = document.createElement('i');
-        icon.className = `fas ${iconClass}`;
-        button.appendChild(icon);
-        button.addEventListener('click', onClick);
-        return button;
-    }
-
-    function updatePreviews() {
-        const studentPreview = $('#homeStudentPreview');
-        const coursePreview = $('#homeCoursesPreview');
-        const memoryPreview = $('#homeMemoryPreview');
-        const lecturerPreview = $('#homeLecturerPreview');
-        const gratitudePreview = $('#homeGratitudePreview');
-
-        if (!studentPreview) return;
-
-        studentPreview.replaceChildren();
-        allStudents.slice(0, 6).forEach(student => {
-            const item = document.createElement('div');
-            item.className = 'home-preview-item';
-            const photo = localStorage.getItem(`photo_${student.id}`);
-            if (photo) {
+        function openZoom(src, type) {
+            content.innerHTML = '';
+            if (type === 'video') {
+                const v = document.createElement('video');
+                v.src = src;
+                v.controls = true;
+                v.className = 'zoom-video';
+                v.autoplay = true;
+                content.appendChild(v);
+            } else {
                 const img = document.createElement('img');
-                img.src = photo;
-                img.alt = student.name;
-                img.className = 'preview-photo';
-                item.appendChild(img);
-            } else {
-                const icon = document.createElement('i');
-                icon.className = 'fas fa-user-circle';
-                item.appendChild(icon);
+                img.src = src;
+                img.className = 'zoom-content';
+                content.appendChild(img);
             }
-            const name = document.createElement('div');
-            name.className = 'label';
-            name.textContent = student.name;
-            const id = document.createElement('div');
-            id.className = 'count';
-            id.textContent = student.id;
-            item.append(name, id);
-            studentPreview.appendChild(item);
+            modal.classList.add('active');
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closeZoom() {
+            modal.classList.remove('active');
+            document.body.style.overflow = '';
+            const v = content.querySelector('video');
+            if (v) v.pause();
+            content.innerHTML = '';
+        }
+
+        closeBtn.addEventListener('click', closeZoom);
+        modal.addEventListener('click', (e) => { if (e.target === modal) closeZoom(); });
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeZoom(); });
+
+        window.openZoom = openZoom;
+    }
+
+    /* ============================================================
+       SCROLL ANIMATIONS + PROGRESS
+       ============================================================ */
+    function setupScrollAnimations() {
+        const els = $$('.scroll-animate');
+        const obs = new IntersectionObserver((entries) => {
+            entries.forEach((en) => {
+                if (en.isIntersecting) en.target.classList.add('visible');
+            });
+        }, { threshold: 0.1, rootMargin: '0px 0px -50px 0px' });
+        els.forEach((el) => obs.observe(el));
+    }
+
+    function setupScrollProgress() {
+        const bar = document.createElement('div');
+        bar.className = 'scroll-progress';
+        document.body.prepend(bar);
+        window.addEventListener('scroll', () => {
+            const top = window.pageYOffset || document.documentElement.scrollTop;
+            const height = document.documentElement.scrollHeight - document.documentElement.clientHeight;
+            bar.style.width = (top / height) * 100 + '%';
         });
+    }
 
-        if (coursePreview) {
-            coursePreview.replaceChildren();
-            coursesData.slice(0, 6).forEach(course => {
-                const item = document.createElement('div');
-                item.className = 'home-preview-item';
-                const icon = document.createElement('i');
-                icon.className = 'fas fa-book';
-                const code = document.createElement('div');
-                code.className = 'label';
-                code.textContent = course.code;
-                const name = document.createElement('div');
-                name.className = 'count';
-                name.textContent = course.name;
-                item.append(icon, code, name);
-                coursePreview.appendChild(item);
-            });
-        }
+    /* ============================================================
+       LOGO (Firebase Storage)
+       ============================================================ */
+    function setupLogoUpload() {
+        const holder = $('#logoPlaceholder');
 
-        if (memoryPreview) {
-            memoryPreview.replaceChildren();
-            const memories = Object.entries(memoryData)
-                .flatMap(([category, items]) => items.map(item => ({ ...item, category })))
-                .slice(0, 4);
-
-            if (!memories.length) {
-                const item = document.createElement('div');
-                item.className = 'home-preview-item';
-                item.textContent = 'No memories yet';
-                memoryPreview.appendChild(item);
+        // Try to load from cloud first
+        (async () => {
+            if (!FIREBASE) return;
+            const data = await readFromFirestore('settings', 'logo');
+            if (data && data.url) {
+                holder.innerHTML = '';
+                const img = document.createElement('img');
+                img.src = data.url;
+                img.alt = 'University Logo';
+                holder.appendChild(img);
+                const input = document.createElement('input');
+                input.type = 'file';
+                input.id = 'logoUpload';
+                input.accept = 'image/*';
+                holder.appendChild(input);
+                input.addEventListener('change', handleLogoUpload);
             } else {
-                memories.forEach(memory => {
-                    const item = document.createElement('div');
-                    item.className = 'home-preview-item';
-                    const label = document.createElement('div');
-                    label.className = 'count';
-                    label.textContent = memory.category;
-                    if (memory.type?.startsWith('image/') && memory.data) {
-                        const img = document.createElement('img');
-                        img.src = memory.data;
-                        img.alt = memory.name || 'Memory';
-                        img.className = 'preview-img-sm';
-                        item.appendChild(img);
-                    } else {
-                        const icon = document.createElement('i');
-                        icon.className = `fas ${memory.type?.startsWith('video/') ? 'fa-video' : 'fa-file'}`;
-                        item.appendChild(icon);
-                    }
-                    item.appendChild(label);
-                    memoryPreview.appendChild(item);
-                });
+                const input = $('#logoUpload');
+                if (input) input.addEventListener('change', handleLogoUpload);
             }
+        })();
+    }
+
+    async function handleLogoUpload(e) {
+        const input = e.target;
+        if (!isAdmin) {
+            showModal('Access Denied', '🔒 Admin login required to upload logo.', 'error');
+            input.value = '';
+            return;
+        }
+        const file = input.files[0];
+        if (!file) return;
+        if (file.size > 2 * 1024 * 1024) {
+            showModal('File Too Large', '⚠️ Logo file must be under 2MB.', 'warning');
+            input.value = '';
+            return;
+        }
+        try {
+            setCloudStatus('', 'Uploading logo...');
+            const url = await uploadToCloud('logo/university-logo', file);
+            await saveToFirestore('settings', 'logo', { url });
+            setCloudStatus('connected', 'Synced');
+
+            const holder = $('#logoPlaceholder');
+            holder.innerHTML = '';
+            const img = document.createElement('img');
+            img.src = url;
+            img.alt = 'University Logo';
+            holder.appendChild(img);
+            const newInput = document.createElement('input');
+            newInput.type = 'file';
+            newInput.id = 'logoUpload';
+            newInput.accept = 'image/*';
+            holder.appendChild(newInput);
+            newInput.addEventListener('change', handleLogoUpload);
+
+            showModal('Success!', '✅ School logo synced to the cloud!', 'success');
+        } catch (err) {
+            console.error(err);
+            setCloudStatus('error', 'Upload failed');
+            showModal('Upload Failed', '❌ Could not upload logo. Check your Firebase config.', 'error');
+        }
+    }
+
+    /* ============================================================
+       HOME PREVIEWS
+       ============================================================ */
+    async function renderHomePreviews() {
+        /* Students preview */
+        const studentPreview = $('#homeStudentPreview');
+        studentPreview.innerHTML = '';
+        const previewStudents = allStudents.slice(0, 6);
+        previewStudents.forEach((s) => {
+            const div = document.createElement('div');
+            div.className = 'home-preview-item';
+            (async () => {
+                const data = await readFromFirestore('studentPhotos', s.id);
+                const url = data && data.url;
+                div.innerHTML = `
+                    ${url ? `<img src="${url}" class="preview-photo" alt="${s.name}">`
+                          : '<i class="fas fa-user-circle" style="font-size:2rem; color:#B0B0B0;"></i>'}
+                    <div class="label">${s.name}</div>
+                    <div class="count">${s.id}</div>`;
+            })();
+            studentPreview.appendChild(div);
+        });
+        if (allStudents.length > 6) {
+            const more = document.createElement('div');
+            more.className = 'home-preview-item';
+            more.innerHTML = `<i class="fas fa-ellipsis-h" style="font-size:1.5rem; color:#007ACC;"></i>
+                              <div class="label">+${allStudents.length - 6} more</div>`;
+            studentPreview.appendChild(more);
         }
 
-        if (lecturerPreview) {
-            lecturerPreview.replaceChildren();
-            lecturers.slice(0, 6).forEach((lecturer, index) => {
-                const item = document.createElement('div');
-                item.className = 'home-preview-item';
-                const photo = localStorage.getItem(`lecturer_photo_${index}`);
-                if (photo) {
-                    const img = document.createElement('img');
-                    img.src = photo;
-                    img.alt = lecturer.name;
-                    img.className = 'preview-photo';
-                    item.appendChild(img);
-                } else {
-                    const icon = document.createElement('i');
-                    icon.className = 'fas fa-user-tie';
-                    item.appendChild(icon);
-                }
-                const name = document.createElement('div');
-                name.className = 'label';
-                name.textContent = lecturer.name;
-                const role = document.createElement('div');
-                role.className = 'count';
-                role.textContent = lecturer.role;
-                item.append(name, role);
-                lecturerPreview.appendChild(item);
-            });
+        /* Courses preview */
+        const coursesPreview = $('#homeCoursesPreview');
+        coursesPreview.innerHTML = '';
+        coursesData.slice(0, 6).forEach((c) => {
+            const div = document.createElement('div');
+            div.className = 'home-preview-item';
+            div.innerHTML = `<i class="fas fa-book" style="font-size:1.5rem; color:#007ACC;"></i>
+                             <div class="label">${c.code}</div>
+                             <div class="count">${c.name}</div>`;
+            coursesPreview.appendChild(div);
+        });
+        if (coursesData.length > 6) {
+            const more = document.createElement('div');
+            more.className = 'home-preview-item';
+            more.innerHTML = `<i class="fas fa-ellipsis-h" style="font-size:1.5rem; color:#007ACC;"></i>
+                              <div class="label">+${coursesData.length - 6} more</div>`;
+            coursesPreview.appendChild(more);
         }
 
-        if (gratitudePreview) {
-            gratitudePreview.replaceChildren();
-            gratitudeItems.slice(0, 6).forEach(item => {
+        /* Memories preview */
+        const memoryPreview = $('#homeMemoryPreview');
+        memoryPreview.innerHTML = '';
+        const allMemories = [];
+        Object.keys(memoryData).forEach((cat) => {
+            memoryData[cat].forEach((item) => allMemories.push({ ...item, category: cat }));
+        });
+        const previewMem = allMemories.slice(0, 4);
+        if (previewMem.length === 0) {
+            memoryPreview.innerHTML =
+                `<div class="home-preview-item"><i class="fas fa-images" style="font-size:2rem; color:#B0B0B0;"></i><div class="label">No memories yet</div></div>`;
+        } else {
+            previewMem.forEach((item) => {
                 const div = document.createElement('div');
                 div.className = 'home-preview-item';
-                const icon = document.createElement('i');
-                icon.className = `fas ${item.icon}`;
-                const label = document.createElement('div');
-                label.className = 'label';
-                label.textContent = item.label;
-                div.append(icon, label);
-                gratitudePreview.appendChild(div);
+                const isVid = item.type && item.type.startsWith('video/');
+                const isImg = item.type && item.type.startsWith('image/');
+                let html = '';
+                if (isImg && item.url) html = `<img src="${item.url}" class="preview-img-sm" alt="memory">`;
+                else if (isVid) html = `<i class="fas fa-video" style="font-size:2rem; color:#007ACC;"></i>`;
+                else html = `<i class="fas fa-file" style="font-size:2rem; color:#007ACC;"></i>`;
+                div.innerHTML = `${html}<div class="count">${item.category}</div>`;
+                memoryPreview.appendChild(div);
             });
-        }
-    }
-
-    function storeImage(file, key, onDone) {
-        if (!file || !file.type.startsWith('image/')) {
-            showModal('Invalid file', 'Please select an image file.', 'warning');
-            return;
-        }
-        if (file.size > MAX_IMAGE_BYTES) {
-            showModal('File too large', 'Images must be 2 MB or smaller.', 'warning');
-            return;
-        }
-
-        const reader = new FileReader();
-        reader.onerror = () => showModal('Upload failed', 'The image could not be read.', 'error');
-        reader.onload = () => {
-            try {
-                localStorage.setItem(key, reader.result);
-                onDone(reader.result);
-            } catch {
-                showModal('Storage full', 'Could not save this image. Try a smaller file.', 'warning');
+            if (allMemories.length > 4) {
+                const more = document.createElement('div');
+                more.className = 'home-preview-item';
+                more.innerHTML = `<i class="fas fa-ellipsis-h" style="font-size:1.5rem; color:#007ACC;"></i>
+                                  <div class="label">+${allMemories.length - 4} more</div>`;
+                memoryPreview.appendChild(more);
             }
-        };
-        reader.readAsDataURL(file);
+        }
+
+        /* Lecturers preview */
+        const lecturerPreview = $('#homeLecturerPreview');
+        lecturerPreview.innerHTML = '';
+        lecturers.slice(0, 6).forEach((l, idx) => {
+            const div = document.createElement('div');
+            div.className = 'home-preview-item';
+            (async () => {
+                const data = await readFromFirestore('lecturerPhotos', String(idx));
+                const url = data && data.url;
+                div.innerHTML = `
+                    ${url ? `<img src="${url}" class="preview-photo" alt="${l.name}">`
+                          : '<i class="fas fa-user-tie" style="font-size:2rem; color:#B0B0B0;"></i>'}
+                    <div class="label">${l.name}</div>
+                    <div class="count">${l.role}</div>`;
+            })();
+            lecturerPreview.appendChild(div);
+        });
+        if (lecturers.length > 6) {
+            const more = document.createElement('div');
+            more.className = 'home-preview-item';
+            more.innerHTML = `<i class="fas fa-ellipsis-h" style="font-size:1.5rem; color:#007ACC;"></i>
+                              <div class="label">+${lecturers.length - 6} more</div>`;
+            lecturerPreview.appendChild(more);
+        }
+
+        /* Gratitude preview */
+        const gratitudePreview = $('#homeGratitudePreview');
+        gratitudePreview.innerHTML = '';
+        gratitudeItems.slice(0, 6).forEach((g) => {
+            const div = document.createElement('div');
+            div.className = 'home-preview-item';
+            div.innerHTML = `<i class="fas ${g.icon}" style="font-size:1.5rem; color:#007ACC;"></i>
+                             <div class="label">${g.label}</div>`;
+            gratitudePreview.appendChild(div);
+        });
+        if (gratitudeItems.length > 6) {
+            const more = document.createElement('div');
+            more.className = 'home-preview-item';
+            more.innerHTML = `<i class="fas fa-ellipsis-h" style="font-size:1.5rem; color:#007ACC;"></i>
+                              <div class="label">+${gratitudeItems.length - 6} more</div>`;
+            gratitudePreview.appendChild(more);
+        }
     }
 
-    function setupLogo() {
-        const holder = $('#logoPlaceholder');
-        if (!holder) return;
+    /* ============================================================
+       STUDENTS
+       ============================================================ */
+    async function renderStudents() {
+        const container = $('#studentStreams');
+        const computer = allStudents.filter((s) => s.stream === 'Computer');
+        const comm = allStudents.filter((s) => s.stream === 'Communication');
 
-        const paintLogo = data => {
-            holder.replaceChildren();
-            if (data) {
-                const img = document.createElement('img');
-                img.src = data;
-                img.alt = 'University logo';
-                holder.appendChild(img);
-            } else {
-                const icon = document.createElement('i');
-                icon.className = 'fas fa-university';
-                holder.appendChild(icon);
-            }
-            const input = document.createElement('input');
-            input.type = 'file';
-            input.id = 'logoUpload';
-            input.accept = 'image/*';
-            input.setAttribute('aria-label', 'Upload university logo');
-            holder.appendChild(input);
-            input.addEventListener('change', event => {
-                if (!isAdmin) {
-                    event.target.value = '';
-                    showModal('Access denied', 'Admin login is required to change the logo.', 'error');
-                    return;
-                }
-                storeImage(event.target.files[0], LOGO_KEY, paintLogo);
-            });
-        };
+        const buildStream = (title, students) => {
+            const col = document.createElement('div');
+            col.className = 'stream-col';
+            col.innerHTML = `<h3><i class="fas fa-microchip" style="color:#007ACC;"></i> ${title}</h3>`;
 
-        paintLogo(localStorage.getItem(LOGO_KEY));
-    }
+            students.forEach((s) => {
+                const div = document.createElement('div');
+                div.className = 'student-mini' + (isAdmin ? ' admin-mode' : '');
 
-    function setupStudentPhoto(photoDiv, student) {
-        const input = document.createElement('input');
-        input.type = 'file';
-        input.accept = 'image/*';
-        input.setAttribute('aria-label', `Upload photo for ${student.name}`);
+                /* Photo */
+                const photoDiv = document.createElement('div');
+                photoDiv.className = 'photo-upload';
+                const input = document.createElement('input');
+                input.type = 'file';
+                input.accept = 'image/*';
 
-        const renderPhoto = data => {
-            photoDiv.replaceChildren();
-            if (data) {
-                const img = document.createElement('img');
-                img.src = data;
-                img.alt = student.name;
-                photoDiv.appendChild(img);
-                photoDiv.classList.add('uploaded');
-            } else {
                 const icon = document.createElement('i');
                 icon.className = 'fas fa-camera';
                 photoDiv.appendChild(icon);
-                photoDiv.classList.remove('uploaded');
-            }
-            if (isAdmin) photoDiv.appendChild(input);
-        };
+                photoDiv.appendChild(input);
 
-        renderPhoto(localStorage.getItem(`photo_${student.id}`));
-        if (isAdmin) {
-            input.addEventListener('change', event => {
-                storeImage(event.target.files[0], `photo_${student.id}`, data => {
-                    renderPhoto(data);
-                    updatePreviews();
-                });
-            });
-        }
-    }
+                // Load existing cloud photo
+                (async () => {
+                    const data = await readFromFirestore('studentPhotos', s.id);
+                    if (data && data.url) {
+                        const img = document.createElement('img');
+                        img.src = data.url;
+                        img.alt = s.name;
+                        photoDiv.appendChild(img);
+                        icon.style.display = 'none';
+                        photoDiv.classList.add('uploaded');
+                    }
+                    if (!isAdmin) {
+                        input.disabled = true;
+                        input.style.opacity = '0.3';
+                    }
+                })();
 
-    function renderStudents() {
-        const container = $('#studentStreams');
-        if (!container) return;
-        container.replaceChildren();
+                if (isAdmin) {
+                    input.addEventListener('change', async (e) => {
+                        const file = e.target.files[0];
+                        if (!file) return;
+                        try {
+                            setCloudStatus('', 'Uploading photo...');
+                            const url = await uploadToCloud(`students/${s.id}`, file);
+                            await saveToFirestore('studentPhotos', s.id, { url });
+                            setCloudStatus('connected', 'Synced');
 
-        const buildStream = (title, stream) => {
-            const column = document.createElement('div');
-            column.className = 'stream-col';
-            const heading = document.createElement('h3');
-            heading.textContent = title;
-            column.appendChild(heading);
+                            const existing = photoDiv.querySelector('img');
+                            if (existing) existing.remove();
+                            const ic = photoDiv.querySelector('i');
+                            if (ic) ic.style.display = 'none';
+                            const img = document.createElement('img');
+                            img.src = url;
+                            img.alt = s.name;
+                            photoDiv.appendChild(img);
+                            photoDiv.classList.add('uploaded');
+                            showModal('Success!', '✅ Photo synced to the cloud!', 'success');
+                            renderHomePreviews();
+                        } catch (err) {
+                            console.error(err);
+                            setCloudStatus('error', 'Upload failed');
+                            showModal('Upload Failed', '❌ Could not upload photo.', 'error');
+                        }
+                    });
+                }
 
-            allStudents.filter(student => student.stream === stream).forEach(student => {
-                const row = document.createElement('div');
-                row.className = `student-mini${isAdmin ? ' admin-mode' : ''}`;
-
-                const photo = document.createElement('div');
-                photo.className = 'photo-upload';
-                setupStudentPhoto(photo, student);
-
+                /* Info */
                 const info = document.createElement('div');
                 info.className = 'info';
-                const name = document.createElement('div');
-                name.className = 'name';
-                name.textContent = student.name;
-                const id = document.createElement('div');
-                id.className = 'id';
-                id.textContent = student.id;
-                info.append(name, id);
-                row.append(photo, info);
+                const nameSpan = document.createElement('div');
+                nameSpan.className = 'name';
+                nameSpan.textContent = s.name;
+                const idSpan = document.createElement('div');
+                idSpan.className = 'id';
+                idSpan.textContent = s.id;
+                info.appendChild(nameSpan);
+                info.appendChild(idSpan);
 
+                /* Controls */
                 const controls = document.createElement('div');
                 controls.className = 'edit-controls';
+
                 if (isAdmin) {
-                    controls.append(
-                        makeButton('fa-pen', 'Edit student', () => {
-                            const newName = prompt('Enter student name:', student.name)?.trim();
-                            if (!newName) return;
-                            const newId = prompt('Enter student ID:', student.id)?.trim();
-                            if (!newId) return;
-                            if (newId !== student.id && allStudents.some(s => s.id === newId)) {
-                                showModal('Duplicate ID', 'That student ID is already in use.', 'error');
-                                return;
-                            }
-                            const oldId = student.id;
-                            student.name = newName;
-                            student.id = newId;
-                            const photoData = localStorage.getItem(`photo_${oldId}`);
-                            if (photoData && oldId !== newId) {
-                                localStorage.setItem(`photo_${newId}`, photoData);
-                                localStorage.removeItem(`photo_${oldId}`);
-                            }
+                    const editBtn = document.createElement('button');
+                    editBtn.innerHTML = '<i class="fas fa-pen"></i>';
+                    editBtn.title = 'Edit student';
+                    editBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        const newName = prompt('Enter new name:', s.name);
+                        if (!newName || !newName.trim()) return;
+                        const newId = prompt('Enter new ID:', s.id);
+                        if (!newId || !newId.trim()) return;
+                        const oldId = s.id;
+                        s.name = newName.trim();
+                        s.id = newId.trim();
+                        if (oldId !== newId) {
+                            // Move photo record to new ID
+                            (async () => {
+                                const old = await readFromFirestore('studentPhotos', oldId);
+                                if (old && old.url) {
+                                    await saveToFirestore('studentPhotos', newId, { url: old.url });
+                                    await deleteFromCloud(`students/${oldId}`);
+                                    // Delete old doc (best effort)
+                                }
+                                await saveAllData();
+                                renderStudents();
+                                renderHomePreviews();
+                                showModal('Success!', `✅ Student updated to "${s.name}" (${s.id}).`, 'success');
+                            })();
+                        } else {
                             saveAllData();
                             renderStudents();
-                            updatePreviews();
-                        }),
-                        makeButton('fa-trash', 'Delete student', () => {
-                            showConfirmModal(`Remove ${student.name}?`, confirmed => {
-                                if (!confirmed) return;
-                                allStudents = allStudents.filter(item => item !== student);
-                                localStorage.removeItem(`photo_${student.id}`);
-                                saveAllData();
-                                renderStudents();
-                                updatePreviews();
-                            });
-                        }, true)
-                    );
+                            renderHomePreviews();
+                            showModal('Success!', `✅ Student updated.`, 'success');
+                        }
+                    });
+
+                    const deleteBtn = document.createElement('button');
+                    deleteBtn.className = 'delete-btn';
+                    deleteBtn.innerHTML = '<i class="fas fa-trash"></i>';
+                    deleteBtn.title = 'Remove student';
+                    deleteBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        showConfirmModal(`Remove ${s.name}?`, async (ok) => {
+                            if (!ok) return;
+                            await deleteFromCloud(`students/${s.id}`);
+                            allStudents = allStudents.filter((st) => st.id !== s.id);
+                            await saveAllData();
+                            renderStudents();
+                            renderHomePreviews();
+                            showModal('Deleted!', `✅ ${s.name} has been removed.`, 'success');
+                        });
+                    });
+
+                    controls.appendChild(editBtn);
+                    controls.appendChild(deleteBtn);
                 }
-                row.appendChild(controls);
-                column.appendChild(row);
+
+                div.appendChild(photoDiv);
+                div.appendChild(info);
+                div.appendChild(controls);
+                col.appendChild(div);
             });
 
+            /* Add student */
             if (isAdmin) {
-                const add = document.createElement('button');
-                add.type = 'button';
-                add.className = 'student-mini';
-                add.textContent = '+ Add Student';
-                add.addEventListener('click', () => {
-                    const name = prompt('Enter student name:')?.trim();
+                const addDiv = document.createElement('div');
+                addDiv.className = 'student-mini';
+                addDiv.style.cssText = 'justify-content:center; cursor:pointer; border:2px dashed #007ACC;';
+                addDiv.innerHTML = `<i class="fas fa-plus-circle" style="color:#007ACC; font-size:1.5rem;"></i>
+                                    <span style="color:#007ACC; font-weight:600;">Add Student</span>`;
+                addDiv.addEventListener('click', () => {
+                    const name = prompt('Enter student name:');
                     if (!name) return;
-                    const id = prompt('Enter student ID:')?.trim();
+                    const id = prompt('Enter student ID (e.g., ECE/1031/19):');
                     if (!id) return;
-                    if (allStudents.some(student => student.id === id)) {
-                        showModal('Duplicate ID', 'That student ID is already in use.', 'error');
+                    if (allStudents.some((s) => s.id === id)) {
+                        showModal('Error', '❌ This ID already exists.', 'error');
                         return;
                     }
-                    const stream = confirm('Choose OK for Computer, Cancel for Communication.')
-                        ? 'Computer'
-                        : 'Communication';
+                    const stream = confirm('Click OK for Computer, Cancel for Communication') ? 'Computer' : 'Communication';
                     allStudents.push({ name, id, stream });
                     saveAllData();
                     renderStudents();
-                    updatePreviews();
+                    renderHomePreviews();
+                    showModal('Success!', `✅ ${name} has been added.`, 'success');
                 });
-                column.appendChild(add);
+                col.appendChild(addDiv);
             }
-            return column;
+
+            return col;
         };
 
-        container.append(
-            buildStream('⚡ Electrical & Computer', 'Computer'),
-            buildStream('📡 Electrical & Communication', 'Communication')
-        );
+        container.innerHTML = '';
+        container.appendChild(buildStream('⚡ Electrical & Computer', computer));
+        container.appendChild(buildStream('📡 Electrical & Communication', comm));
     }
 
+    /* ============================================================
+       COURSES
+       ============================================================ */
     function renderCourses() {
         const container = $('#coursesContainer');
-        if (!container) return;
-        container.replaceChildren();
+        container.innerHTML = '';
 
-        const groups = new Map();
-        coursesData.forEach(course => {
-            if (!groups.has(course.year)) groups.set(course.year, []);
-            groups.get(course.year).push(course);
+        const grouped = {};
+        coursesData.forEach((c) => {
+            if (!grouped[c.year]) grouped[c.year] = [];
+            grouped[c.year].push(c);
         });
 
-        [...yearOrder, ...[...groups.keys()].filter(year => !yearOrder.includes(year))]
-            .forEach(year => {
-                const courses = groups.get(year);
-                if (!courses) return;
+        YEAR_ORDER.forEach((year) => {
+            if (!grouped[year]) return;
 
-                const section = document.createElement('div');
-                section.className = 'courses-year';
-                const heading = document.createElement('h3');
-                heading.className = 'courses-year-title';
-                heading.textContent = `${yearEmoji[year] || '📖'} ${year}`;
-                const grid = document.createElement('div');
-                grid.className = 'courses-grid';
+            const yearDiv = document.createElement('div');
+            yearDiv.className = 'courses-year scroll-animate';
 
-                courses.forEach(course => {
-                    const item = document.createElement('div');
-                    item.className = `course-item${isAdmin ? ' admin-mode' : ''}`;
-                    const code = document.createElement('div');
-                    code.className = 'course-code';
-                    code.textContent = course.code;
-                    const name = document.createElement('div');
-                    name.className = 'course-name';
-                    name.textContent = course.name;
-                    item.append(code, name);
+            const heading = document.createElement('h3');
+            heading.className = 'courses-year-title';
+            heading.textContent = `${YEAR_EMOJI[year] || '📖'} ${year}`;
+            yearDiv.appendChild(heading);
 
-                    if (isAdmin) {
-                        const actions = document.createElement('div');
-                        actions.className = 'edit-controls';
-                        actions.append(
-                            makeButton('fa-pen', 'Edit course', () => {
-                                const newCode = prompt('Course code:', course.code)?.trim();
-                                const newName = prompt('Course name:', course.name)?.trim();
-                                const newYear = prompt(
-                                    'Year (, Sophomore, Junior, Senior, Fifth Year):',
-                                    course.year
-                                )?.trim();
-                                if (!newCode || !newName || !newYear) return;
-                                Object.assign(course, { code: newCode, name: newName, year: newYear });
-                                saveAllData();
-                                renderCourses();
-                                updatePreviews();
-                            }),
-                            makeButton('fa-trash', 'Delete course', () => {
-                                showConfirmModal(`Delete ${course.code}?`, confirmed => {
-                                    if (!confirmed) return;
-                                    coursesData = coursesData.filter(item => item !== course);
-                                    saveAllData();
-                                    renderCourses();
-                                    updatePreviews();
-                                });
-                            }, true)
-                        );
-                        item.appendChild(actions);
-                    }
-                    grid.appendChild(item);
-                });
+            const grid = document.createElement('div');
+            grid.className = 'courses-grid';
+
+            grouped[year].forEach((course) => {
+                const idx = coursesData.indexOf(course);
+                const item = document.createElement('div');
+                item.className = 'course-item' + (isAdmin ? ' admin-mode' : '');
+                item.innerHTML = `<div class="course-code">${course.code}</div>
+                                  <div class="course-name">${course.name}</div>`;
 
                 if (isAdmin) {
-                    const add = document.createElement('button');
-                    add.type = 'button';
-                    add.className = 'course-item add-btn';
-                    add.textContent = '+ Add Course';
-                    add.addEventListener('click', () => {
-                        const code = prompt('Course code:')?.trim();
-                        const name = prompt('Course name:')?.trim();
-                        if (!code || !name) return;
-                        coursesData.push({ code, name, year });
+                    const actions = document.createElement('div');
+                    actions.className = 'edit-controls';
+
+                    const editBtn = document.createElement('button');
+                    editBtn.innerHTML = '<i class="fas fa-pen"></i>';
+                    editBtn.title = 'Edit course';
+                    editBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        const newCode = prompt('Edit course code:', course.code);
+                        if (!newCode || !newCode.trim()) return;
+                        const newName = prompt('Edit course name:', course.name);
+                        if (!newName || !newName.trim()) return;
+                        const newYear = prompt('Edit year (Freshman, Sophomore, Junior, Senior, Fifth Year):', course.year);
+                        if (!newYear || !newYear.trim()) return;
+                        coursesData[idx] = {
+                            code: newCode.trim(),
+                            name: newName.trim(),
+                            year: newYear.trim()
+                        };
                         saveAllData();
                         renderCourses();
-                        updatePreviews();
+                        renderHomePreviews();
+                        showModal('Success!', `✅ Course "${newCode.trim()}" updated.`, 'success');
                     });
-                    grid.appendChild(add);
+
+                    const delBtn = document.createElement('button');
+                    delBtn.className = 'delete-btn';
+                    delBtn.innerHTML = '<i class="fas fa-trash"></i>';
+                    delBtn.title = 'Delete course';
+                    delBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        showConfirmModal(`Delete "${course.code}"?`, (ok) => {
+                            if (!ok) return;
+                            coursesData.splice(idx, 1);
+                            saveAllData();
+                            renderCourses();
+                            renderHomePreviews();
+                            showModal('Deleted!', `✅ "${course.code}" removed.`, 'success');
+                        });
+                    });
+
+                    actions.appendChild(editBtn);
+                    actions.appendChild(delBtn);
+                    item.appendChild(actions);
                 }
 
-                section.append(heading, grid);
-                container.appendChild(section);
+                grid.appendChild(item);
             });
+
+            if (isAdmin) {
+                const addItem = document.createElement('div');
+                addItem.className = 'course-item add-btn';
+                addItem.innerHTML = `<i class="fas fa-plus-circle"></i> Add Course`;
+                addItem.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const code = prompt('Enter course code (e.g., ECEG 1011):');
+                    if (!code || !code.trim()) return;
+                    const name = prompt('Enter course name:');
+                    if (!name || !name.trim()) return;
+                    coursesData.push({ code: code.trim(), name: name.trim(), year });
+                    saveAllData();
+                    renderCourses();
+                    renderHomePreviews();
+                    showModal('Success!', `✅ "${code.trim()}" added to ${year}.`, 'success');
+                });
+                grid.appendChild(addItem);
+            }
+
+            yearDiv.appendChild(grid);
+            container.appendChild(yearDiv);
+        });
     }
 
-    function renderLecturers() {
+    /* ============================================================
+       LECTURERS (Firebase Storage)
+       ============================================================ */
+    async function renderLecturers() {
         const grid = $('#lecturerGrid');
-        if (!grid) return;
-        grid.replaceChildren();
+        grid.innerHTML = '';
 
-        lecturers.forEach((lecturer, index) => {
+        lecturers.forEach((l, idx) => {
             const card = document.createElement('div');
-            card.className = 'lecturer-card';
+            card.className = 'lecturer-card' + (isAdmin ? ' admin-mode' : '');
 
-            const photo = document.createElement('div');
-            photo.className = 'photo-upload';
+            const photoDiv = document.createElement('div');
+            photoDiv.className = 'photo-upload';
             const input = document.createElement('input');
             input.type = 'file';
             input.accept = 'image/*';
-            input.setAttribute('aria-label', `Upload photo for ${lecturer.name}`);
 
-            const drawPhoto = data => {
-                photo.replaceChildren();
-                if (data) {
+            const icon = document.createElement('i');
+            icon.className = 'fas fa-camera';
+            photoDiv.appendChild(icon);
+            photoDiv.appendChild(input);
+
+            (async () => {
+                const data = await readFromFirestore('lecturerPhotos', String(idx));
+                if (data && data.url) {
                     const img = document.createElement('img');
-                    img.src = data;
-                    img.alt = lecturer.name;
-                    photo.appendChild(img);
-                    photo.classList.add('uploaded');
-                } else {
-                    const icon = document.createElement('i');
-                    icon.className = 'fas fa-camera';
-                    photo.appendChild(icon);
-                    photo.classList.remove('uploaded');
+                    img.src = data.url;
+                    img.alt = l.name;
+                    photoDiv.appendChild(img);
+                    icon.style.display = 'none';
+                    photoDiv.classList.add('uploaded');
                 }
-                if (isAdmin) photo.appendChild(input);
-            };
-            drawPhoto(localStorage.getItem(`lecturer_photo_${index}`));
+            })();
 
             if (isAdmin) {
-                input.addEventListener('change', event => {
-                    storeImage(event.target.files[0], `lecturer_photo_${index}`, data => {
-                        drawPhoto(data);
-                        updatePreviews();
-                    });
+                input.addEventListener('change', async (e) => {
+                    const file = e.target.files[0];
+                    if (!file) return;
+                    try {
+                        setCloudStatus('', 'Uploading lecturer photo...');
+                        const url = await uploadToCloud(`lecturers/${idx}`, file);
+                        await saveToFirestore('lecturerPhotos', String(idx), { url });
+                        setCloudStatus('connected', 'Synced');
+
+                        const existing = photoDiv.querySelector('img');
+                        if (existing) existing.remove();
+                        const ic = photoDiv.querySelector('i');
+                        if (ic) ic.style.display = 'none';
+                        const img = document.createElement('img');
+                        img.src = url;
+                        img.alt = l.name;
+                        photoDiv.appendChild(img);
+                        photoDiv.classList.add('uploaded');
+                        showModal('Success!', '✅ Lecturer photo synced to cloud!', 'success');
+                        renderHomePreviews();
+                    } catch (err) {
+                        console.error(err);
+                        setCloudStatus('error', 'Upload failed');
+                        showModal('Upload Failed', '❌ Could not upload lecturer photo.', 'error');
+                    }
                 });
             }
 
-            const name = document.createElement(isAdmin ? 'input' : 'div');
-            name.className = 'name';
+            const nameDiv = document.createElement('div');
+            nameDiv.className = 'name';
             if (isAdmin) {
-                name.value = lecturer.name;
-                name.classList.add('editable-input');
-                name.addEventListener('change', () => {
-                    lecturer.name = name.value.trim() || lecturer.name;
+                const nameInput = document.createElement('input');
+                nameInput.type = 'text';
+                nameInput.value = l.name;
+                nameInput.className = 'editable-input';
+                nameInput.style.width = '140px';
+                nameInput.addEventListener('change', function () {
+                    l.name = this.value;
                     saveAllData();
-                    updatePreviews();
+                    renderHomePreviews();
+                    showModal('Success!', '✅ Lecturer name updated.', 'success');
                 });
+                nameDiv.appendChild(nameInput);
             } else {
-                name.textContent = lecturer.name;
+                nameDiv.textContent = l.name;
             }
 
-            const role = document.createElement(isAdmin ? 'input' : 'div');
-            role.className = 'role';
+            const roleDiv = document.createElement('div');
+            roleDiv.className = 'role';
             if (isAdmin) {
-                role.value = lecturer.role;
-                role.classList.add('editable-input');
-                role.addEventListener('change', () => {
-                    lecturer.role = role.value.trim() || lecturer.role;
+                const roleInput = document.createElement('input');
+                roleInput.type = 'text';
+                roleInput.value = l.role;
+                roleInput.className = 'editable-input';
+                roleInput.style.width = '120px';
+                roleInput.addEventListener('change', function () {
+                    l.role = this.value;
                     saveAllData();
-                    updatePreviews();
+                    renderHomePreviews();
+                    showModal('Success!', '✅ Lecturer role updated.', 'success');
                 });
+                roleDiv.appendChild(roleInput);
             } else {
-                role.textContent = lecturer.role;
+                roleDiv.textContent = l.role;
             }
 
-            card.append(photo, name, role);
-
+            const controls = document.createElement('div');
+            controls.className = 'edit-controls';
             if (isAdmin) {
-                card.classList.add('admin-mode');
-                const controls = document.createElement('div');
-                controls.className = 'edit-controls';
-                controls.appendChild(makeButton('fa-trash', 'Delete lecturer', () => {
-                    showConfirmModal(`Remove ${lecturer.name}?`, confirmed => {
-                        if (!confirmed) return;
-                        lecturers = lecturers.filter(item => item !== lecturer);
-                        saveAllData();
+                const delBtn = document.createElement('button');
+                delBtn.className = 'delete-btn';
+                delBtn.innerHTML = '<i class="fas fa-trash"></i>';
+                delBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    showConfirmModal(`Remove ${l.name}?`, async (ok) => {
+                        if (!ok) return;
+                        await deleteFromCloud(`lecturers/${idx}`);
+                        lecturers = lecturers.filter((_, i) => i !== idx);
+                        await saveAllData();
                         renderLecturers();
-                        updatePreviews();
+                        renderHomePreviews();
+                        showModal('Deleted!', `✅ ${l.name} removed.`, 'success');
                     });
-                }, true));
-                card.appendChild(controls);
+                });
+                controls.appendChild(delBtn);
             }
+
+            card.appendChild(photoDiv);
+            card.appendChild(nameDiv);
+            card.appendChild(roleDiv);
+            card.appendChild(controls);
             grid.appendChild(card);
         });
 
         if (isAdmin) {
-            const add = document.createElement('button');
-            add.type = 'button';
-            add.className = 'lecturer-card';
-            add.textContent = '+ Add Lecturer';
-            add.addEventListener('click', () => {
-                const name = prompt('Lecturer name:')?.trim();
-                const role = prompt('Role:')?.trim();
-                if (!name || !role) return;
+            const addCard = document.createElement('div');
+            addCard.className = 'lecturer-card';
+            addCard.style.cssText = 'justify-content:center; cursor:pointer; border:2px dashed #007ACC;';
+            addCard.innerHTML = `<i class="fas fa-plus-circle" style="color:#007ACC; font-size:2rem;"></i>
+                                 <div style="color:#007ACC; margin-top:4px; font-weight:600;">Add Lecturer</div>`;
+            addCard.addEventListener('click', () => {
+                const name = prompt('Enter lecturer name:');
+                if (!name) return;
+                const role = prompt('Enter role (e.g., Head, Electrical Engineering):');
+                if (!role) return;
                 lecturers.push({ name, role });
                 saveAllData();
                 renderLecturers();
-                updatePreviews();
+                renderHomePreviews();
+                showModal('Success!', `✅ ${name} added.`, 'success');
             });
-            grid.appendChild(add);
+            grid.appendChild(addCard);
         }
     }
 
+    /* ============================================================
+       MEMORIES (Firebase Storage)
+       ============================================================ */
     function renderMemories() {
         const container = $('#memoryContainer');
-        if (!container) return;
-        container.replaceChildren();
+        container.innerHTML = '';
 
-        Object.entries(memoryData).forEach(([category, items]) => {
-            const section = document.createElement('div');
-            section.className = 'mem-category';
+        Object.keys(memoryData).forEach((cat) => {
+            const catDiv = document.createElement('div');
+            catDiv.className = 'mem-category';
 
-            const heading = document.createElement('h4');
-            const icon = document.createElement('i');
-            icon.className = 'fas fa-folder-open';
-            const label = document.createElement('span');
-            label.textContent = category;
-            heading.append(icon, label);
-
+            const header = document.createElement('h4');
+            header.innerHTML = `<i class="fas fa-folder-open" style="color:#007ACC;"></i> ${cat}`;
             if (isAdmin) {
-                const rename = document.createElement('button');
-                rename.type = 'button';
-                rename.className = 'rename-cat-btn';
-                rename.textContent = 'Rename';
-                rename.addEventListener('click', () => {
-                    const newName = prompt('New category name:', category)?.trim();
-                    if (!newName || newName === category) return;
-                    if (memoryData[newName]) {
-                        showModal('Category exists', 'Choose a different category name.', 'warning');
-                        return;
+                const editBtn = document.createElement('button');
+                editBtn.innerHTML = '<i class="fas fa-pen"></i>';
+                editBtn.className = 'rename-cat-btn';
+                editBtn.addEventListener('click', () => {
+                    const newName = prompt('Rename category:', cat);
+                    if (newName && newName !== cat) {
+                        memoryData[newName] = memoryData[cat];
+                        delete memoryData[cat];
+                        saveAllData();
+                        renderMemories();
+                        renderHomePreviews();
+                        showModal('Success!', `✅ Renamed to "${newName}".`, 'success');
                     }
-                    memoryData[newName] = memoryData[category];
-                    delete memoryData[category];
-                    saveAllData();
-                    renderMemories();
-                    updatePreviews();
                 });
-                heading.appendChild(rename);
+                header.appendChild(editBtn);
             }
+            catDiv.appendChild(header);
 
             const grid = document.createElement('div');
             grid.className = 'mem-grid';
 
-            items.forEach((memory, index) => {
+            memoryData[cat].forEach((item, index) => {
                 const card = document.createElement('div');
                 card.className = 'mem-card stored';
+                const isVideo = item.type && item.type.startsWith('video/');
+                const isImage = item.type && item.type.startsWith('image/');
 
-                if (memory.type?.startsWith('image/') && memory.data) {
-                    const img = document.createElement('img');
-                    img.src = memory.data;
-                    img.alt = memory.name || 'Memory';
-                    img.className = 'preview-img';
-                    img.addEventListener('click', () => openZoom(memory.data, 'image'));
-                    card.appendChild(img);
-                } else if (memory.type?.startsWith('video/') && memory.data) {
-                    const video = document.createElement('video');
-                    video.src = memory.data;
-                    video.controls = true;
-                    video.className = 'preview-video';
-                    video.addEventListener('click', event => {
-                        event.preventDefault();
-                        openZoom(memory.data, 'video');
-                    });
-                    card.appendChild(video);
-                } else {
-                    const filename = document.createElement('div');
-                    filename.className = 'file-name';
-                    filename.textContent = memory.name || 'File';
-                    const download = document.createElement('a');
-                    download.href = memory.data;
-                    download.download = memory.name || 'file';
-                    download.className = 'download-link';
-                    download.textContent = 'Download';
-                    card.append(filename, download);
+                if (item.url) {
+                    if (isVideo) {
+                        const v = document.createElement('video');
+                        v.src = item.url;
+                        v.controls = true;
+                        v.className = 'preview-video';
+                        v.muted = true;
+                        v.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            window.openZoom(item.url, 'video');
+                        });
+                        card.appendChild(v);
+                    } else if (isImage) {
+                        const img = document.createElement('img');
+                        img.src = item.url;
+                        img.className = 'preview-img';
+                        img.alt = item.name || 'Memory';
+                        img.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            window.openZoom(item.url, 'image');
+                        });
+                        card.appendChild(img);
+                    } else {
+                        const wrap = document.createElement('div');
+                        wrap.style.cssText = 'display:flex; flex-direction:column; align-items:center; gap:4px;';
+                        wrap.innerHTML = `<i class="fas fa-file" style="font-size:3rem; color:#007ACC;"></i>
+                                          <div class="file-name">${item.name || 'File'}</div>`;
+                        const link = document.createElement('a');
+                        link.href = item.url;
+                        link.download = item.name || 'file';
+                        link.className = 'download-link';
+                        link.innerHTML = '<i class="fas fa-download"></i> Download';
+                        wrap.appendChild(link);
+                        card.appendChild(wrap);
+                    }
                 }
 
+                const removeBtn = document.createElement('button');
+                removeBtn.className = 'remove-btn';
+                removeBtn.innerHTML = '✕';
                 if (isAdmin) {
-                    const remove = document.createElement('button');
-                    remove.type = 'button';
-                    remove.className = 'remove-btn';
-                    remove.textContent = '×';
-                    remove.setAttribute('aria-label', 'Remove memory');
-                    remove.addEventListener('click', () => {
-                        showConfirmModal(`Remove this memory from "${category}"?`, confirmed => {
-                            if (!confirmed) return;
-                            memoryData[category].splice(index, 1);
-                            saveAllData();
+                    removeBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        showConfirmModal(`Remove this memory from "${cat}"?`, async (ok) => {
+                            if (!ok) return;
+                            // Delete from Storage if we have a path
+                            if (item.path) await deleteFromCloud(item.path);
+                            memoryData[cat].splice(index, 1);
+                            await saveAllData();
                             renderMemories();
-                            updatePreviews();
+                            renderHomePreviews();
+                            showModal('Deleted!', '✅ Memory removed.', 'success');
                         });
                     });
-                    card.appendChild(remove);
+                } else {
+                    removeBtn.style.display = 'none';
                 }
+                card.appendChild(removeBtn);
                 grid.appendChild(card);
             });
 
-            const upload = document.createElement('div');
-            upload.className = 'mem-card';
-            const uploadTitle = document.createElement('span');
-            uploadTitle.textContent = `Add to ${category}`;
-            const input = document.createElement('input');
-            input.type = 'file';
-            input.className = 'file-input';
-            input.setAttribute('aria-label', `Upload file to ${category}`);
-            upload.append(uploadTitle, input);
-
-            input.addEventListener('change', () => {
-                const file = input.files?.[0];
+            /* Upload card */
+            const uploadCard = document.createElement('div');
+            uploadCard.className = 'mem-card';
+            uploadCard.innerHTML = `
+                <i class="fas fa-plus-circle" style="color:#007ACC;"></i>
+                <span style="font-weight:600; font-size:0.9rem;">Add to ${cat}</span>
+                <span style="font-size:0.7rem; color:#B0B0B0;">Any file type supported</span>
+                <input type="file" class="file-input" accept="*/*">`;
+            const fileInput = uploadCard.querySelector('.file-input');
+            fileInput.addEventListener('change', async function (e) {
+                const file = e.target.files[0];
                 if (!file) return;
-                if (file.size > MAX_MEMORY_BYTES) {
-                    showModal('File too large', 'Files must be 10 MB or smaller.', 'warning');
-                    input.value = '';
+                if (file.size > 10 * 1024 * 1024) {
+                    showModal('File Too Large', '⚠️ File must be under 10MB.', 'warning');
+                    this.value = '';
                     return;
                 }
-                const reader = new FileReader();
-                reader.onerror = () => showModal('Upload failed', 'The file could not be read.', 'error');
-                reader.onload = () => {
-                    memoryData[category].push({
+                try {
+                    setCloudStatus('', 'Uploading memory...');
+                    const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+                    const path = `memories/${cat}/${Date.now()}_${safeName}`;
+                    const url = await uploadToCloud(path, file);
+
+                    memoryData[cat].push({
                         name: file.name,
                         type: file.type || 'application/octet-stream',
-                        data: reader.result
+                        url,
+                        path
                     });
-                    if (saveAllData()) {
-                        renderMemories();
-                        updatePreviews();
-                    } else {
-                        memoryData[category].pop();
-                    }
-                };
-                reader.readAsDataURL(file);
+                    await saveAllData();
+                    setCloudStatus('connected', 'Synced');
+                    renderMemories();
+                    renderHomePreviews();
+                    showModal('Success!', `✅ Uploaded "${file.name}" to cloud!`, 'success');
+                } catch (err) {
+                    console.error(err);
+                    setCloudStatus('error', 'Upload failed');
+                    showModal('Upload Failed', '❌ Could not upload memory.', 'error');
+                }
+            });
+            uploadCard.addEventListener('click', (e) => {
+                if (e.target.tagName !== 'INPUT') fileInput.click();
             });
 
-            section.append(heading, grid);
-            grid.appendChild(upload);
-            container.appendChild(section);
+            grid.appendChild(uploadCard);
+            catDiv.appendChild(grid);
+            container.appendChild(catDiv);
         });
     }
 
+    /* ============================================================
+       GRATITUDE
+       ============================================================ */
     function renderGratitude() {
         const grid = $('#gratitudeGrid');
-        if (!grid) return;
-        grid.replaceChildren();
+        grid.innerHTML = '';
 
-        gratitudeItems.forEach(item => {
-            const card = document.createElement('div');
-            card.className = `grat-item${isAdmin ? ' admin-mode' : ''}`;
-            const text = document.createElement('span');
-            const icon = document.createElement('i');
-            icon.className = `fas ${item.icon}`;
-            text.append(icon, document.createTextNode(` ${item.label}`));
-            card.appendChild(text);
+        gratitudeItems.forEach((g, idx) => {
+            const div = document.createElement('div');
+            div.className = 'grat-item' + (isAdmin ? ' admin-mode' : '');
+
+            const span = document.createElement('span');
+            span.innerHTML = `<i class="fas ${g.icon}"></i> `;
 
             if (isAdmin) {
-                const controls = document.createElement('div');
-                controls.className = 'edit-controls';
-                controls.appendChild(makeButton('fa-pen', 'Edit gratitude item', () => {
-                    const label = prompt('Gratitude item:', item.label)?.trim();
-                    if (!label) return;
-                    item.label = label;
+                const input = document.createElement('input');
+                input.type = 'text';
+                input.value = g.label;
+                input.className = 'editable-input';
+                input.style.width = '120px';
+                input.addEventListener('change', function () {
+                    g.label = this.value;
                     saveAllData();
-                    renderGratitude();
-                    updatePreviews();
-                }));
-                controls.appendChild(makeButton('fa-trash', 'Delete gratitude item', () => {
-                    showConfirmModal(`Remove "${item.label}"?`, confirmed => {
-                        if (!confirmed) return;
-                        gratitudeItems = gratitudeItems.filter(entry => entry !== item);
+                    renderHomePreviews();
+                    showModal('Success!', '✅ Gratitude item updated.', 'success');
+                });
+                span.appendChild(input);
+            } else {
+                span.appendChild(document.createTextNode(g.label));
+            }
+            div.appendChild(span);
+
+            const controls = document.createElement('div');
+            controls.className = 'edit-controls';
+            if (isAdmin) {
+                const delBtn = document.createElement('button');
+                delBtn.className = 'delete-btn';
+                delBtn.innerHTML = '<i class="fas fa-trash"></i>';
+                delBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    showConfirmModal(`Remove "${g.label}"?`, (ok) => {
+                        if (!ok) return;
+                        gratitudeItems = gratitudeItems.filter((_, i) => i !== idx);
                         saveAllData();
                         renderGratitude();
-                        updatePreviews();
+                        renderHomePreviews();
+                        showModal('Deleted!', '✅ Gratitude item removed.', 'success');
                     });
-                }, true));
-                card.appendChild(controls);
+                });
+                controls.appendChild(delBtn);
             }
-            grid.appendChild(card);
+            div.appendChild(controls);
+            grid.appendChild(div);
         });
 
         if (isAdmin) {
-            const add = document.createElement('button');
-            add.type = 'button';
-            add.className = 'grat-item add-btn';
-            add.textContent = '+ Add Item';
-            add.addEventListener('click', () => {
-                const label = prompt('Gratitude item:')?.trim();
+            const addDiv = document.createElement('div');
+            addDiv.className = 'grat-item add-btn';
+            addDiv.innerHTML = '<i class="fas fa-plus-circle"></i> Add Item';
+            addDiv.addEventListener('click', () => {
+                const label = prompt('Enter gratitude item:');
                 if (!label) return;
-                gratitudeItems.push({ icon: 'fa-heart', label });
+                const icon = prompt('Enter icon class (e.g., fa-users):') || 'fa-heart';
+                gratitudeItems.push({
+                    icon: icon.startsWith('fa-') ? icon : 'fa-' + icon,
+                    label
+                });
                 saveAllData();
                 renderGratitude();
-                updatePreviews();
+                renderHomePreviews();
+                showModal('Success!', `✅ "${label}" added.`, 'success');
             });
-            grid.appendChild(add);
+            grid.appendChild(addDiv);
         }
     }
 
+    /* ============================================================
+       GOVERNMENT EDIT CONTROLS
+       ============================================================ */
     function renderGov() {
-        $$('.gov-block').forEach(block => {
-            let controls = $('.edit-controls', block);
+        $$('.gov-block').forEach((block) => {
+            block.classList.toggle('admin-mode', isAdmin);
+            let controls = block.querySelector('.edit-controls');
             if (!controls) {
                 controls = document.createElement('div');
                 controls.className = 'edit-controls';
                 block.appendChild(controls);
             }
-            controls.replaceChildren();
-            block.classList.toggle('admin-mode', isAdmin);
-
+            controls.innerHTML = '';
             if (isAdmin) {
-                controls.appendChild(makeButton('fa-pen', 'Edit government section', () => {
-                    const content = $('.gov-content', block);
-                    const editor = $('#govEditor');
-                    if (!content || !editor) {
-                        showModal('Editor unavailable', 'Add the govEditor textarea to the HTML first.', 'warning');
-                        return;
+                const editBtn = document.createElement('button');
+                editBtn.innerHTML = '<i class="fas fa-pen"></i>';
+                editBtn.title = 'Edit content';
+                editBtn.addEventListener('click', () => {
+                    const content = block.querySelector('.gov-content');
+                    if (!content) return;
+                    const newContent = prompt('Edit government section content:', content.innerHTML);
+                    if (newContent !== null) {
+                        content.innerHTML = newContent;
+                        saveAllData();
+                        showModal('Success!', '✅ Government section updated.', 'success');
                     }
-                    editor.value = content.innerText;
-                    editor.classList.remove('hidden');
-                    editor.focus();
-                    showConfirmModal('Save the edited government information?', confirmed => {
-                        if (confirmed) {
-                            content.textContent = editor.value;
-                            saveAllData();
-                        }
-                        editor.classList.add('hidden');
-                    });
-                }));
+                });
+                controls.appendChild(editBtn);
             }
         });
     }
 
-    function openZoom(src, type) {
-        const modal = $('#zoomModal');
-        const content = $('#zoomContent');
-        if (!modal || !content) return;
-
-        content.replaceChildren();
-        const element = document.createElement(type === 'video' ? 'video' : 'img');
-        element.src = src;
-        element.className = type === 'video' ? 'zoom-video' : 'zoom-content';
-        if (type === 'video') {
-            element.controls = true;
-            element.autoplay = true;
-        } else {
-            element.alt = 'Memory image';
-        }
-        content.appendChild(element);
-        modal.classList.add('active');
-        document.body.style.overflow = 'hidden';
-    }
-
-    function closeZoom() {
-        const modal = $('#zoomModal');
-        const content = $('#zoomContent');
-        if (!modal || !content) return;
-        $('video', content)?.pause();
-        content.replaceChildren();
-        modal.classList.remove('active');
-        document.body.style.overflow = '';
-    }
-
-    function renderAll() {
-        renderStudents();
-        renderCourses();
-        renderLecturers();
-        renderMemories();
-        renderGratitude();
-        renderGov();
-        updatePreviews();
-    }
-
+    /* ============================================================
+       NAVIGATION
+       ============================================================ */
     function setupNavigation() {
+        const links = $$('#mainNav a');
         const sections = {
             home: $('#section-home'),
             students: $('#section-students'),
@@ -1062,100 +1274,163 @@
             gratitude: $('#section-gratitude')
         };
 
-        const navigate = id => {
-            Object.values(sections).forEach(section => section?.classList.remove('active'));
-            $$('#mainNav a').forEach(link => link.classList.remove('active'));
-            sections[id]?.classList.add('active');
-            $(`#mainNav a[data-section="${id}"]`)?.classList.add('active');
-            sections[id]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        const navigateTo = (id) => {
+            Object.values(sections).forEach((s) => s.classList.remove('active'));
+            links.forEach((l) => l.classList.remove('active'));
+            if (sections[id]) sections[id].classList.add('active');
+            const link = document.querySelector(`#mainNav a[data-section="${id}"]`);
+            if (link) link.classList.add('active');
+            if (sections[id]) {
+                setTimeout(() => sections[id].scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+            }
         };
 
-        document.addEventListener('click', event => {
-            const link = event.target.closest('[data-section]');
-            if (!link) return;
-            event.preventDefault();
-            navigate(link.dataset.section);
+        links.forEach((link) => {
+            link.addEventListener('click', (e) => {
+                e.preventDefault();
+                navigateTo(link.dataset.section);
+            });
+        });
+
+        $$('.view-all-link').forEach((link) => {
+            link.addEventListener('click', (e) => {
+                e.preventDefault();
+                navigateTo(link.dataset.section);
+            });
         });
     }
 
+    /* ============================================================
+       ADMIN LOGIN
+       ============================================================ */
     function setupAdmin() {
-        const password = $('#adminPass');
-        const login = $('#adminLoginBtn');
-        const logout = $('#adminLogoutBtn');
-        const status = $('#adminStatus');
+        const loginBtn = $('#adminLoginBtn');
+        const logoutBtn = $('#adminLogoutBtn');
+        const passInput = $('#adminPass');
+        const statusSpan = $('#adminStatus');
 
-        const refresh = () => {
-            status.innerHTML = isAdmin
-                ? '<i class="fas fa-user-shield"></i> Admin'
-                : '<i class="fas fa-user"></i> Guest';
-            login.classList.toggle('hidden', isAdmin);
-            logout.classList.toggle('hidden', !isAdmin);
-            password.classList.toggle('hidden', isAdmin);
-            renderAll();
-            setupLogo();
+        const updateUI = () => {
+            if (isAdmin) {
+                statusSpan.innerHTML = '<i class="fas fa-user-shield"></i> Admin';
+                loginBtn.classList.add('hidden');
+                logoutBtn.classList.remove('hidden');
+                passInput.classList.add('hidden');
+            } else {
+                statusSpan.innerHTML = '<i class="fas fa-user"></i> Guest';
+                loginBtn.classList.remove('hidden');
+                logoutBtn.classList.add('hidden');
+                passInput.classList.remove('hidden');
+            }
+            renderStudents();
+            renderCourses();
+            renderLecturers();
+            renderMemories();
+            renderGratitude();
+            renderGov();
+            renderHomePreviews();
         };
 
-        login.addEventListener('click', () => {
-            if (password.value === ADMIN_PASSWORD) {
+        loginBtn.addEventListener('click', () => {
+            if (passInput.value === ADMIN_PASSWORD) {
                 isAdmin = true;
-                password.value = '';
-                refresh();
-                showModal('Access granted', 'You are now in demo admin mode.', 'success');
+                updateUI();
+                showModal('Access Granted', '✅ You now have full admin access to edit all content.', 'success');
             } else {
-                showModal('Access denied', 'Incorrect password.', 'error');
+                showModal('Access Denied', '❌ Incorrect password. Please try again.', 'error');
             }
         });
 
-        logout.addEventListener('click', () => {
+        logoutBtn.addEventListener('click', () => {
             isAdmin = false;
-            refresh();
-            showModal('Logged out', 'You have been logged out.', 'info');
+            updateUI();
+            showModal('Logged Out', '🔒 You have been logged out successfully.', 'warning');
         });
 
-        password.addEventListener('keydown', event => {
-            if (event.key === 'Enter') login.click();
+        passInput.addEventListener('keyup', (e) => {
+            if (e.key === 'Enter') loginBtn.click();
         });
 
-        refresh();
+        updateUI();
     }
 
-    function setupScroll() {
-        const bar = document.createElement('div');
-        bar.className = 'scroll-progress';
-        document.body.prepend(bar);
-
-        const update = () => {
-            const max = document.documentElement.scrollHeight - window.innerHeight;
-            bar.style.width = `${max > 0 ? (window.scrollY / max) * 100 : 0}%`;
-        };
-        window.addEventListener('scroll', update, { passive: true });
-        window.addEventListener('resize', update);
-
-        if ('IntersectionObserver' in window) {
-            const observer = new IntersectionObserver(entries => {
-                entries.forEach(entry => {
-                    if (entry.isIntersecting) entry.target.classList.add('visible');
-                });
-            }, { threshold: 0.1 });
-            $$('.scroll-animate').forEach(element => observer.observe(element));
-        } else {
-            $$('.scroll-animate').forEach(element => element.classList.add('visible'));
+    /* ============================================================
+       FIREBASE CONNECTION LISTENER
+       ============================================================ */
+    async function initFirebase() {
+        if (!window.Firebase) {
+            setCloudStatus('error', 'Firebase not loaded');
+            return;
         }
-        update();
+        FIREBASE = window.Firebase;
+        firebaseReady = true;
+        setCloudStatus('connected', 'Cloud connected');
+
+        try {
+            // Pull data from Firestore
+            await loadAllData();
+            // Refresh every section with cloud data
+            renderStudents();
+            renderCourses();
+            renderLecturers();
+            renderMemories();
+            renderGratitude();
+            renderGov();
+            renderHomePreviews();
+
+            // Live updates: re-render whenever Firestore changes
+            if (FIREBASE.onSnapshot) {
+                const ref = FIREBASE.doc(FIREBASE.db, 'yearbook', 'main');
+                FIREBASE.onSnapshot(ref, (snap) => {
+                    if (!snap.exists()) return;
+                    const data = snap.data();
+                    if (data.students) allStudents = data.students;
+                    if (data.lecturers) lecturers = data.lecturers;
+                    if (data.gratitude) gratitudeItems = data.gratitude;
+                    if (data.memories) memoryData = data.memories;
+                    if (data.courses) coursesData = data.courses;
+                    renderStudents();
+                    renderCourses();
+                    renderLecturers();
+                    renderMemories();
+                    renderGratitude();
+                    renderGov();
+                    renderHomePreviews();
+                });
+            }
+        } catch (e) {
+            console.error(e);
+            setCloudStatus('error', 'Sync failed');
+        }
     }
 
-    $('#zoomClose')?.addEventListener('click', closeZoom);
-    $('#zoomModal')?.addEventListener('click', event => {
-        if (event.target === $('#zoomModal')) closeZoom();
-    });
-    document.addEventListener('keydown', event => {
-        if (event.key === 'Escape') closeZoom();
-    });
+    /* ============================================================
+       INIT
+       ============================================================ */
+    function init() {
+        // These run regardless of Firebase readiness
+        setupNavigation();
+        setupAdmin();          // Renders with in-memory defaults first
+        setupZoom();
+        setupScrollAnimations();
+        setupScrollProgress();
+        setTimeout(setupLogoUpload, 100);
 
-    loadAllData();
-    setupNavigation();
-    setupScroll();
-    setupAdmin();
+        // Wait for Firebase module to fire 'firebase-ready'
+        window.addEventListener('firebase-ready', initFirebase);
+        // In case the module already loaded before our listener
+        if (window.Firebase) initFirebase();
+        else {
+            // Fallback: try again in 2 seconds
+            setTimeout(() => { if (window.Firebase) initFirebase(); }, 2000);
+        }
 
-    console.log('ECE 2019EC Yearbook loaded. Demo admin password: admin123');
+        console.log('🎓 ECE 2019EC Yearbook · Nimo Graphics');
+        console.log('🔑 Admin password: admin123');
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
 })();
